@@ -1568,7 +1568,10 @@ impl RequestForwarder {
             .get("model")
             .and_then(|v| v.as_str())
             .unwrap_or("<none>");
-        log::info!("[{tag}] >>> 请求 URL: {url} (model={request_model})");
+        log::info!(
+            "[{tag}] >>> 请求 URL: {} (model={request_model})",
+            crate::proxy::http_client::mask_url(&url)
+        );
         if log::log_enabled!(log::Level::Debug) {
             if let Ok(body_str) = serde_json::to_string(&filtered_body) {
                 log::debug!(
@@ -1644,9 +1647,12 @@ impl RequestForwarder {
         } else {
             // HTTP 代理或直连：走 hyper raw write（保持 header 大小写）
             // 如果有 HTTP 代理，hyper_client 会用 CONNECT 隧道穿过代理
-            let uri: http::Uri = url
-                .parse()
-                .map_err(|e| ProxyError::ForwardFailed(format!("Invalid URL '{url}': {e}")))?;
+            let uri: http::Uri = url.parse().map_err(|e| {
+                ProxyError::ForwardFailed(format!(
+                    "Invalid URL '{}': {e}",
+                    crate::proxy::http_client::mask_url(&url)
+                ))
+            })?;
             super::hyper_client::send_request(
                 uri,
                 method.clone(),

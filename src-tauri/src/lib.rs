@@ -68,34 +68,7 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 
 fn redact_url_for_log(url_str: &str) -> String {
-    match url::Url::parse(url_str) {
-        Ok(url) => {
-            let mut output = format!("{}://", url.scheme());
-            if let Some(host) = url.host_str() {
-                output.push_str(host);
-            }
-            output.push_str(url.path());
-
-            let mut keys: Vec<String> = url.query_pairs().map(|(k, _)| k.to_string()).collect();
-            keys.sort();
-            keys.dedup();
-
-            if !keys.is_empty() {
-                output.push_str("?[keys:");
-                output.push_str(&keys.join(","));
-                output.push(']');
-            }
-
-            output
-        }
-        Err(_) => {
-            let base = url_str.split('#').next().unwrap_or(url_str);
-            match base.split_once('?') {
-                Some((prefix, _)) => format!("{prefix}?[redacted]"),
-                None => base.to_string(),
-            }
-        }
-    }
+    crate::deeplink::redact_url_for_log(url_str)
 }
 
 /// 统一处理 ccswitch:// 深链接 URL
@@ -115,7 +88,7 @@ fn handle_deeplink_url(
 
     let redacted_url = redact_url_for_log(url_str);
     log::info!("✓ Deep link URL detected from {source}: {redacted_url}");
-    log::debug!("Deep link URL (raw) from {source}: {url_str}");
+    log::debug!("Deep link URL from {source}: {redacted_url}");
 
     match crate::deeplink::parse_deeplink_url(url_str) {
         Ok(request) => {
@@ -151,7 +124,7 @@ fn handle_deeplink_url(
             if let Err(emit_err) = app.emit(
                 "deeplink-error",
                 serde_json::json!({
-                    "url": url_str,
+                    "url": redacted_url,
                     "error": e.to_string()
                 }),
             ) {
@@ -1407,7 +1380,8 @@ pub fn run() {
                 RunEvent::Opened { urls } => {
                     if let Some(url) = urls.first() {
                         let url_str = url.to_string();
-                        log::info!("RunEvent::Opened with URL: {url_str}");
+                        let redacted_url = redact_url_for_log(&url_str);
+                        log::info!("RunEvent::Opened with URL: {redacted_url}");
 
                         if url_str.starts_with("ccswitch://") {
                             if crate::lightweight::is_lightweight_mode() {
@@ -1442,7 +1416,7 @@ pub fn run() {
                                     if let Err(emit_err) = app_handle.emit(
                                         "deeplink-error",
                                         serde_json::json!({
-                                            "url": url_str,
+                                            "url": redacted_url,
                                             "error": e.to_string()
                                         }),
                                     ) {

@@ -65,7 +65,10 @@ pub async fn fetch_models(
     let mut last_err: Option<String> = None;
 
     for url in &candidates {
-        log::debug!("[ModelFetch] Trying endpoint: {url}");
+        log::debug!(
+            "[ModelFetch] Trying endpoint: {}",
+            crate::proxy::http_client::mask_url(url)
+        );
         let response = match client
             .get(url)
             .header("Authorization", format!("Bearer {api_key}"))

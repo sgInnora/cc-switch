@@ -90,6 +90,9 @@ impl ProxyServer {
             return Err(ProxyError::AlreadyRunning);
         }
 
+        validate_proxy_listen_config(&self.config.listen_address, self.config.listen_port)
+            .map_err(ProxyError::BindFailed)?;
+
         let addr: SocketAddr =
             format!("{}:{}", self.config.listen_address, self.config.listen_port)
                 .parse()

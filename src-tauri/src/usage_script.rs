@@ -1,9 +1,24 @@
+use futures::StreamExt;
 use rquickjs::{Context, Function, Runtime};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::time::{Duration, Instant};
 use url::{Host, Url};
 
 use crate::error::AppError;
+
+const MAX_USAGE_SCRIPT_SOURCE_BYTES: usize = 512 * 1024;
+const MAX_USAGE_SCRIPT_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
+const USAGE_SCRIPT_MEMORY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+const USAGE_SCRIPT_MAX_STACK_BYTES: usize = 512 * 1024;
+#[cfg(test)]
+const USAGE_SCRIPT_JS_TIMEOUT_MS: u64 = 50;
+#[cfg(not(test))]
+const USAGE_SCRIPT_JS_TIMEOUT_MS: u64 = 2_000;
 
 /// 执行用量查询脚本
 pub async fn execute_usage_script(
@@ -15,6 +30,8 @@ pub async fn execute_usage_script(
     user_id: Option<&str>,
     template_type: Option<&str>,
 ) -> Result<Value, AppError> {
+    validate_script_source_size(script_code)?;
+
     // 检测是否为自定义模板模式
     // 优先使用前端传递的 template_type
     let is_custom_template = template_type.map(|t| t == "custom").unwrap_or(false);
@@ -22,6 +39,7 @@ pub async fn execute_usage_script(
     // 1. 替换模板变量，避免泄露敏感信息
     let script_with_vars =
         build_script_with_vars(script_code, api_key, base_url, access_token, user_id);
+    validate_script_source_size(&script_with_vars)?;
 
     // 2. 验证 base_url 的安全性（仅当提供了 base_url 时）
     // 自定义模板模式下，用户可能不使用模板变量，而是直接在脚本中写完整 URL
@@ -38,6 +56,7 @@ pub async fn execute_usage_script(
                 format!("Failed to create JS runtime: {e}"),
             )
         })?;
+        let script_timed_out = configure_usage_script_runtime(&runtime);
         let context = Context::full(&runtime).map_err(|e| {
             AppError::localized(
                 "usage_script.context_create_failed",
@@ -49,10 +68,12 @@ pub async fn execute_usage_script(
         context.with(|ctx| {
             // 执行用户代码，获取配置对象
             let config: rquickjs::Object = ctx.eval(script_with_vars.clone()).map_err(|e| {
-                AppError::localized(
+                usage_script_js_error(
                     "usage_script.config_parse_failed",
-                    format!("解析配置失败: {e}"),
-                    format!("Failed to parse config: {e}"),
+                    "解析配置失败",
+                    "Failed to parse config",
+                    e,
+                    &script_timed_out,
                 )
             })?;
 
@@ -119,6 +140,7 @@ pub async fn execute_usage_script(
                 format!("Failed to create JS runtime: {e}"),
             )
         })?;
+        let script_timed_out = configure_usage_script_runtime(&runtime);
         let context = Context::full(&runtime).map_err(|e| {
             AppError::localized(
                 "usage_script.context_create_failed",
@@ -130,10 +152,12 @@ pub async fn execute_usage_script(
         context.with(|ctx| {
             // 重新 eval 获取配置对象
             let config: rquickjs::Object = ctx.eval(script_with_vars.clone()).map_err(|e| {
-                AppError::localized(
+                usage_script_js_error(
                     "usage_script.config_reparse_failed",
-                    format!("重新解析配置失败: {e}"),
-                    format!("Failed to re-parse config: {e}"),
+                    "重新解析配置失败",
+                    "Failed to re-parse config",
+                    e,
+                    &script_timed_out,
                 )
             })?;
 
@@ -158,10 +182,12 @@ pub async fn execute_usage_script(
 
             // 调用 extractor(response)
             let result_js: rquickjs::Value = extractor.call((response_js,)).map_err(|e| {
-                AppError::localized(
+                usage_script_js_error(
                     "usage_script.extractor_exec_failed",
-                    format!("执行 extractor 失败: {e}"),
-                    format!("Failed to execute extractor: {e}"),
+                    "执行 extractor 失败",
+                    "Failed to execute extractor",
+                    e,
+                    &script_timed_out,
                 )
             })?;
 
@@ -206,6 +232,61 @@ pub async fn execute_usage_script(
     validate_result(&result)?;
 
     Ok(result)
+}
+
+fn configure_usage_script_runtime(runtime: &Runtime) -> Arc<AtomicBool> {
+    runtime.set_memory_limit(USAGE_SCRIPT_MEMORY_LIMIT_BYTES);
+    runtime.set_max_stack_size(USAGE_SCRIPT_MAX_STACK_BYTES);
+
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let timed_out_for_handler = Arc::clone(&timed_out);
+    let deadline = Instant::now() + Duration::from_millis(USAGE_SCRIPT_JS_TIMEOUT_MS);
+    runtime.set_interrupt_handler(Some(Box::new(move || {
+        if Instant::now() >= deadline {
+            timed_out_for_handler.store(true, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    })));
+
+    timed_out
+}
+
+fn usage_script_js_error(
+    key: &'static str,
+    zh_action: &str,
+    en_action: &str,
+    error: impl std::fmt::Display,
+    timed_out: &AtomicBool,
+) -> AppError {
+    if timed_out.load(Ordering::Relaxed) {
+        return AppError::localized(
+            "usage_script.execution_timeout",
+            format!("脚本执行超时（超过 {USAGE_SCRIPT_JS_TIMEOUT_MS} ms）"),
+            format!("Usage script execution timed out after {USAGE_SCRIPT_JS_TIMEOUT_MS} ms"),
+        );
+    }
+
+    AppError::localized(
+        key,
+        format!("{zh_action}: {error}"),
+        format!("{en_action}: {error}"),
+    )
+}
+
+fn validate_script_source_size(script: &str) -> Result<(), AppError> {
+    let size = script.len();
+    if size > MAX_USAGE_SCRIPT_SOURCE_BYTES {
+        return Err(AppError::localized(
+            "usage_script.source_too_large",
+            format!("脚本过大: {size} bytes > {MAX_USAGE_SCRIPT_SOURCE_BYTES} bytes"),
+            format!(
+                "Usage script is too large: {size} bytes > {MAX_USAGE_SCRIPT_SOURCE_BYTES} bytes"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// 请求配置结构
@@ -259,13 +340,7 @@ async fn send_http_request(config: &RequestConfig, timeout_secs: u64) -> Result<
     })?;
 
     let status = resp.status();
-    let text = resp.text().await.map_err(|e| {
-        AppError::localized(
-            "usage_script.read_response_failed",
-            format!("读取响应失败: {e}"),
-            format!("Failed to read response: {e}"),
-        )
-    })?;
+    let text = read_response_text_limited(resp).await?;
 
     if !status.is_success() {
         let preview = if text.len() > 200 {
@@ -285,6 +360,62 @@ async fn send_http_request(config: &RequestConfig, timeout_secs: u64) -> Result<
     }
 
     Ok(text)
+}
+
+async fn read_response_text_limited(resp: reqwest::Response) -> Result<String, AppError> {
+    if let Some(content_length) = resp.content_length() {
+        if content_length > MAX_USAGE_SCRIPT_RESPONSE_BYTES {
+            return Err(AppError::localized(
+                "usage_script.response_too_large",
+                format!(
+                    "响应过大: {content_length} bytes > {MAX_USAGE_SCRIPT_RESPONSE_BYTES} bytes"
+                ),
+                format!(
+                    "Response too large: {content_length} bytes > {MAX_USAGE_SCRIPT_RESPONSE_BYTES} bytes"
+                ),
+            ));
+        }
+    }
+
+    let mut stream = resp.bytes_stream();
+    let mut body = Vec::new();
+    let mut total: u64 = 0;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| {
+            AppError::localized(
+                "usage_script.read_response_failed",
+                format!("读取响应失败: {e}"),
+                format!("Failed to read response: {e}"),
+            )
+        })?;
+
+        total = total.checked_add(chunk.len() as u64).ok_or_else(|| {
+            AppError::localized(
+                "usage_script.response_size_overflow",
+                "响应大小溢出",
+                "Response size overflow",
+            )
+        })?;
+        if total > MAX_USAGE_SCRIPT_RESPONSE_BYTES {
+            return Err(AppError::localized(
+                "usage_script.response_too_large",
+                format!("响应过大: {total} bytes > {MAX_USAGE_SCRIPT_RESPONSE_BYTES} bytes"),
+                format!(
+                    "Response too large: {total} bytes > {MAX_USAGE_SCRIPT_RESPONSE_BYTES} bytes"
+                ),
+            ));
+        }
+
+        body.extend_from_slice(&chunk);
+    }
+
+    String::from_utf8(body).map_err(|e| {
+        AppError::localized(
+            "usage_script.response_utf8_invalid",
+            format!("响应不是有效 UTF-8: {e}"),
+            format!("Response is not valid UTF-8: {e}"),
+        )
+    })
 }
 
 /// 验证脚本返回值（支持单对象或数组）
@@ -577,6 +708,28 @@ mod tests {
         assert!(
             result.is_err(),
             "Should reject HTTP for non-localhost domains"
+        );
+    }
+
+    #[test]
+    fn test_script_source_size_limit() {
+        let oversized = "x".repeat(MAX_USAGE_SCRIPT_SOURCE_BYTES + 1);
+        let result = validate_script_source_size(&oversized);
+        assert!(result.is_err(), "oversized usage script should be rejected");
+    }
+
+    #[test]
+    fn test_usage_script_runtime_interrupts_infinite_loop() {
+        let runtime = Runtime::new().expect("runtime should be created");
+        let timed_out = configure_usage_script_runtime(&runtime);
+        let context = Context::full(&runtime).expect("context should be created");
+
+        let result = context.with(|ctx| ctx.eval::<(), _>("while (true) {}"));
+
+        assert!(result.is_err(), "infinite loop should be interrupted");
+        assert!(
+            timed_out.load(Ordering::Relaxed),
+            "timeout flag should be set"
         );
     }
 

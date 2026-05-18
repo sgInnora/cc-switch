@@ -104,6 +104,8 @@ pub async fn update_global_proxy_config(
     state: tauri::State<'_, AppState>,
     config: GlobalProxyConfig,
 ) -> Result<(), String> {
+    validate_proxy_listen_config(&config.listen_address, config.listen_port)?;
+
     let db = &state.db;
     db.update_global_proxy_config(config)
         .await

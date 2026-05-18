@@ -229,7 +229,8 @@ describe("McpFormModal", () => {
     fireEvent.click(screen.getByText("common.add"));
 
     await waitFor(() => expect(upsertMock).toHaveBeenCalledTimes(1));
-    const [entry] = upsertMock.mock.calls.at(-1) ?? [];
+    const [entry] =
+      upsertMock.mock.calls[upsertMock.mock.calls.length - 1] ?? [];
     expect(entry).toMatchObject({
       id: "my-server",
       name: "Friendly",
@@ -266,7 +267,8 @@ describe("McpFormModal", () => {
 
     await waitFor(() => expect(toastErrorMock).toHaveBeenCalled());
     expect(upsertMock).not.toHaveBeenCalled();
-    const [message] = toastErrorMock.mock.calls.at(-1) ?? [];
+    const [message] =
+      toastErrorMock.mock.calls[toastErrorMock.mock.calls.length - 1] ?? [];
     expect(message).toBe("mcp.error.commandRequired");
   });
 
@@ -314,7 +316,8 @@ command = "run"
     fireEvent.click(screen.getByText("common.add"));
 
     await waitFor(() => expect(upsertMock).toHaveBeenCalledTimes(1));
-    const [entry] = upsertMock.mock.calls.at(-1) ?? [];
+    const [entry] =
+      upsertMock.mock.calls[upsertMock.mock.calls.length - 1] ?? [];
     expect(entry.id).toBe("demo");
     expect(entry.server).toEqual({ type: "stdio", command: "run" });
     expect(onSave).toHaveBeenCalledTimes(1);
@@ -382,7 +385,8 @@ type = "stdio"
     fireEvent.click(screen.getByText("common.save"));
 
     await waitFor(() => expect(upsertMock).toHaveBeenCalledTimes(1));
-    const [entry] = upsertMock.mock.calls.at(-1) ?? [];
+    const [entry] =
+      upsertMock.mock.calls[upsertMock.mock.calls.length - 1] ?? [];
     expect(entry.id).toBe("existing");
     expect(entry.server.command).toBe("updated");
     expect(entry.enabled).toBe(true);
@@ -426,7 +430,8 @@ type = "stdio"
     fireEvent.click(screen.getByText("common.add"));
 
     await waitFor(() => expect(upsertMock).toHaveBeenCalledTimes(1));
-    const [entry] = upsertMock.mock.calls.at(-1) ?? [];
+    const [entry] =
+      upsertMock.mock.calls[upsertMock.mock.calls.length - 1] ?? [];
     expect(entry.id).toBe("no-apps");
     expect(entry.apps).toEqual({
       claude: false,
@@ -455,7 +460,8 @@ type = "stdio"
 
     await waitFor(() => expect(failingSave).toHaveBeenCalled());
     await waitFor(() => expect(toastErrorMock).toHaveBeenCalled());
-    const [message] = toastErrorMock.mock.calls.at(-1) ?? [];
+    const [message] =
+      toastErrorMock.mock.calls[toastErrorMock.mock.calls.length - 1] ?? [];
     expect(message).toBe("保存失败");
 
     const addButton = screen.getByText("common.add") as HTMLButtonElement;

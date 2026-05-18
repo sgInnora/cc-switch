@@ -2210,7 +2210,7 @@
         "saveFailed": "Save failed: {{error}}"
       },
       "invalidPort": "Invalid port, please enter a number between 1024-65535",
-      "invalidAddress": "Invalid address. Enter an IPv4 (e.g. 127.0.0.1), IPv6 (e.g. ::1), or localhost",
+      "invalidAddress": "Invalid address. Enter localhost, 127.0.0.1, or ::1",
       "configSaved": "Routing configuration saved",
       "configSaveFailed": "Failed to save configuration",
       "restartRequired": "Restart routing service for address or port changes to take effect"

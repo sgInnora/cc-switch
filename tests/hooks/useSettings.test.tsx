@@ -380,7 +380,9 @@ describe("useSettings hook", () => {
     });
 
     expect(toastErrorMock).toHaveBeenCalled();
-    const message = toastErrorMock.mock.calls.at(-1)?.[0] as string;
+    const message = toastErrorMock.mock.calls[
+      toastErrorMock.mock.calls.length - 1
+    ]?.[0] as string | undefined;
     expect(message).toContain("同步 Claude 插件失败");
     expect(metadataMock.setRequiresRestart).toHaveBeenCalledWith(true);
   });

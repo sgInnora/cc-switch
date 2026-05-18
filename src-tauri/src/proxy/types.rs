@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 
 /// 代理服务器配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +53,33 @@ impl Default for ProxyConfig {
             streaming_idle_timeout: 120,
             non_streaming_timeout: 600,
         }
+    }
+}
+
+pub fn validate_proxy_listen_config(address: &str, port: u16) -> Result<(), String> {
+    if port < 1024 {
+        return Err("代理端口必须在 1024-65535 之间".to_string());
+    }
+
+    let trimmed = address.trim();
+    if trimmed.is_empty() {
+        return Err("代理监听地址不能为空".to_string());
+    }
+
+    if trimmed.eq_ignore_ascii_case("localhost") {
+        return Ok(());
+    }
+
+    let ip = trimmed
+        .parse::<IpAddr>()
+        .map_err(|_| "代理监听地址必须是 localhost 或 loopback IP".to_string())?;
+    if ip.is_loopback() {
+        Ok(())
+    } else {
+        Err(
+            "代理监听地址只能使用 localhost、127.0.0.1 或 ::1，避免无认证本地代理暴露到局域网"
+                .to_string(),
+        )
     }
 }
 
@@ -372,6 +400,18 @@ impl LogConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_listen_config_allows_loopback_only() {
+        assert!(validate_proxy_listen_config("localhost", 15721).is_ok());
+        assert!(validate_proxy_listen_config("127.0.0.1", 15721).is_ok());
+        assert!(validate_proxy_listen_config("::1", 15721).is_ok());
+
+        assert!(validate_proxy_listen_config("0.0.0.0", 15721).is_err());
+        assert!(validate_proxy_listen_config("192.168.1.10", 15721).is_err());
+        assert!(validate_proxy_listen_config("127.0.0.1.evil.com", 15721).is_err());
+        assert!(validate_proxy_listen_config("127.0.0.1", 80).is_err());
+    }
 
     #[test]
     fn test_rectifier_config_default_enabled() {

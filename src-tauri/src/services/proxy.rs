@@ -966,7 +966,7 @@ impl ProxyService {
         Ok(())
     }
 
-    /// 构造写入 Live 的代理地址（处理 0.0.0.0 / IPv6 等特殊情况）
+    /// 构造写入 Live 的代理地址（处理 IPv6 等特殊情况）
     async fn build_proxy_urls(&self) -> Result<(String, String), String> {
         let config = self
             .db
@@ -974,8 +974,7 @@ impl ProxyService {
             .await
             .map_err(|e| format!("获取代理配置失败: {e}"))?;
 
-        // listen_address 可能是 0.0.0.0（用于监听所有网卡），但客户端无法用 0.0.0.0 连接；
-        // 因此写回到各应用配置时，优先使用本机回环地址。
+        // 旧配置可能残留通配地址；写回到各应用配置时统一使用本机回环地址。
         let connect_host = match config.listen_address.as_str() {
             "0.0.0.0" => "127.0.0.1".to_string(),
             "::" => "::1".to_string(),
@@ -1335,17 +1334,19 @@ impl ProxyService {
 
     fn is_local_proxy_url(url: &str) -> bool {
         let url = url.trim();
-        if !url.starts_with("http://") {
+        let Ok(parsed) = url::Url::parse(url) else {
+            return false;
+        };
+        if parsed.scheme() != "http" {
             return false;
         }
-        let rest = &url["http://".len()..];
-        rest.starts_with("127.0.0.1")
-            || rest.starts_with("localhost")
-            || rest.starts_with("0.0.0.0")
-            || rest.starts_with("[::1]")
-            || rest.starts_with("[::]")
-            || rest.starts_with("::1")
-            || rest.starts_with("::")
+
+        match parsed.host() {
+            Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback() || ip.is_unspecified(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback() || ip.is_unspecified(),
+            None => false,
+        }
     }
 
     fn cleanup_claude_takeover_placeholders_in_live(&self) -> Result<(), String> {
@@ -1893,6 +1894,8 @@ impl ProxyService {
 
     /// 更新代理配置
     pub async fn update_config(&self, config: &ProxyConfig) -> Result<(), String> {
+        validate_proxy_listen_config(&config.listen_address, config.listen_port)?;
+
         // 记录旧配置用于判定是否需要重启
         let previous = self
             .db
@@ -2081,6 +2084,24 @@ mod tests {
                 None => env::remove_var("CC_SWITCH_TEST_HOME"),
             }
         }
+    }
+
+    #[test]
+    fn local_proxy_url_detection_rejects_prefix_spoofing() {
+        assert!(ProxyService::is_local_proxy_url("http://127.0.0.1:15721"));
+        assert!(ProxyService::is_local_proxy_url("http://localhost:15721"));
+        assert!(ProxyService::is_local_proxy_url("http://[::1]:15721"));
+        assert!(ProxyService::is_local_proxy_url("http://0.0.0.0:15721"));
+
+        assert!(!ProxyService::is_local_proxy_url(
+            "http://127.0.0.1.evil.com/v1"
+        ));
+        assert!(!ProxyService::is_local_proxy_url(
+            "http://localhost.evil.com/v1"
+        ));
+        assert!(!ProxyService::is_local_proxy_url(
+            "https://127.0.0.1:15721/v1"
+        ));
     }
 
     #[test]

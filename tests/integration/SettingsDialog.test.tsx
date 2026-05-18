@@ -268,7 +268,9 @@ describe("SettingsPage integration", () => {
     fireEvent.click(screen.getByText("settings.exportConfig"));
 
     await waitFor(() => expect(toastErrorMock).toHaveBeenCalled());
-    const cancelMessage = toastErrorMock.mock.calls.at(-1)?.[0] as string;
+    const cancelMessage = toastErrorMock.mock.calls[
+      toastErrorMock.mock.calls.length - 1
+    ]?.[0] as string | undefined;
     expect(cancelMessage).toMatch(
       /settings\.selectFileFailed|请选择.*保存路径/,
     );
@@ -287,7 +289,9 @@ describe("SettingsPage integration", () => {
     fireEvent.click(screen.getByText("settings.exportConfig"));
 
     await waitFor(() => expect(toastErrorMock).toHaveBeenCalled());
-    const exportMessage = toastErrorMock.mock.calls.at(-1)?.[0] as string;
+    const exportMessage = toastErrorMock.mock.calls[
+      toastErrorMock.mock.calls.length - 1
+    ]?.[0] as string | undefined;
     expect(exportMessage).toContain("disk-full");
     expect(toastSuccessMock).not.toHaveBeenCalled();
   });

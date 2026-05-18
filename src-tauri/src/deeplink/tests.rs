@@ -4,7 +4,7 @@ use super::mcp::parse_mcp_apps;
 use super::parser::parse_deeplink_url;
 use super::prompt::import_prompt_from_deeplink;
 use super::provider::parse_and_merge_config;
-use super::utils::{infer_homepage_from_endpoint, validate_url};
+use super::utils::{infer_homepage_from_endpoint, redact_url_for_log, validate_url};
 use super::DeepLinkImportRequest;
 use crate::AppType;
 use crate::{store::AppState, Database};
@@ -32,6 +32,20 @@ fn test_parse_valid_claude_deeplink() {
     );
     assert_eq!(request.api_key, Some("sk-test-123".to_string()));
     assert_eq!(request.icon, Some("claude".to_string()));
+}
+
+#[test]
+fn test_redact_deeplink_url_for_log_hides_query_values() {
+    let redacted = redact_url_for_log(
+        "ccswitch://v1/import?resource=provider&apiKey=sk-secret&usageAccessToken=tok-secret",
+    );
+
+    assert_eq!(
+        redacted,
+        "ccswitch://v1/import?[keys:apiKey,resource,usageAccessToken]"
+    );
+    assert!(!redacted.contains("sk-secret"));
+    assert!(!redacted.contains("tok-secret"));
 }
 
 #[test]

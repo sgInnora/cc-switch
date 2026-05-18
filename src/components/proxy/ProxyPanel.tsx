@@ -129,7 +129,7 @@ export function ProxyPanel({
         return num >= 0 && num <= 255;
       });
     // IPv6 字面量校验：必须含 `:` 且能在 [..] 包装后被 URL 解析器接受。
-    // 后端 (services/proxy.rs) 会把 `::` 改写成 `::1`，所以这里也接受 `::`。
+    // 代理没有独立鉴权，监听地址只允许 loopback，避免暴露到局域网。
     const isValidIpv6 = (addr: string): boolean => {
       if (!addr.includes(":")) return false;
       try {
@@ -139,16 +139,17 @@ export function ProxyPanel({
         return false;
       }
     };
+    const isLoopbackIpv4 =
+      isValidIpv4(addressTrimmed) && addressTrimmed.startsWith("127.");
+    const isLoopbackIpv6 =
+      isValidIpv6(addressTrimmed) &&
+      (addressTrimmed === "::1" || addressTrimmed === "0:0:0:0:0:0:0:1");
     const isValidAddress =
-      addressTrimmed === "localhost" ||
-      addressTrimmed === "0.0.0.0" ||
-      isValidIpv4(addressTrimmed) ||
-      isValidIpv6(addressTrimmed);
+      addressTrimmed === "localhost" || isLoopbackIpv4 || isLoopbackIpv6;
     if (!isValidAddress) {
       toast.error(
         t("proxy.settings.invalidAddress", {
-          defaultValue:
-            "地址无效，请输入 IPv4（如 127.0.0.1）、IPv6（如 ::1）或 localhost",
+          defaultValue: "地址无效，请输入 localhost、127.0.0.1 或 ::1",
         }),
       );
       return;

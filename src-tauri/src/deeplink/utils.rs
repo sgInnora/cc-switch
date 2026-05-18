@@ -6,6 +6,42 @@ use crate::error::AppError;
 use base64::prelude::*;
 use url::Url;
 
+/// Redact a deep-link URL before it is written to logs or UI error payloads.
+///
+/// Deep links can carry API keys, OAuth tokens, MCP config and prompt bodies in
+/// query parameters. Keep routing context and query-key names, but never log
+/// raw query values.
+pub fn redact_url_for_log(url_str: &str) -> String {
+    match Url::parse(url_str) {
+        Ok(url) => {
+            let mut output = format!("{}://", url.scheme());
+            if let Some(host) = url.host_str() {
+                output.push_str(host);
+            }
+            output.push_str(url.path());
+
+            let mut keys: Vec<String> = url.query_pairs().map(|(key, _)| key.to_string()).collect();
+            keys.sort();
+            keys.dedup();
+
+            if !keys.is_empty() {
+                output.push_str("?[keys:");
+                output.push_str(&keys.join(","));
+                output.push(']');
+            }
+
+            output
+        }
+        Err(_) => {
+            let base = url_str.split('#').next().unwrap_or(url_str);
+            match base.split_once('?') {
+                Some((prefix, _)) => format!("{prefix}?[redacted]"),
+                None => base.to_string(),
+            }
+        }
+    }
+}
+
 /// Validate that a string is a valid HTTP(S) URL
 pub fn validate_url(url_str: &str, field_name: &str) -> Result<(), AppError> {
     let url = Url::parse(url_str)

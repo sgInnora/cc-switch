@@ -9,7 +9,10 @@ vi.mock("@/lib/query", () => ({
   useSettingsQuery: (...args: unknown[]) => useSettingsQueryMock(...args),
 }));
 
-let changeLanguageSpy: ReturnType<typeof vi.spyOn<any, any>>;
+let changeLanguageSpy: {
+  mockClear: () => void;
+  mockRestore: () => void;
+};
 
 beforeEach(() => {
   useSettingsQueryMock.mockReset();

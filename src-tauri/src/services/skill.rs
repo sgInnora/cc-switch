@@ -19,6 +19,7 @@ use crate::app_config::{AppType, InstalledSkill, SkillApps, UnmanagedSkill};
 use crate::config::get_app_config_dir;
 use crate::database::Database;
 use crate::error::format_skill_error;
+use futures::StreamExt;
 
 // ========== 数据结构 ==========
 
@@ -265,6 +266,9 @@ struct SkillBackupMetadata {
 }
 
 const SKILL_BACKUP_RETAIN_COUNT: usize = 20;
+const MAX_SKILL_ZIP_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
+const MAX_SKILL_ZIP_EXTRACTED_BYTES: u64 = 200 * 1024 * 1024;
+const MAX_SKILL_ZIP_ENTRIES: usize = 10_000;
 
 /// 技能元数据 (从 SKILL.md 解析)
 #[derive(Debug, Clone, Deserialize)]
@@ -2241,6 +2245,57 @@ impl SkillService {
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("所有分支下载失败")))
     }
 
+    async fn read_response_bytes_limited(response: reqwest::Response) -> Result<bytes::Bytes> {
+        if let Some(content_length) = response.content_length() {
+            if content_length > MAX_SKILL_ZIP_DOWNLOAD_BYTES {
+                return Err(anyhow!(
+                    "Skill ZIP download too large: {content_length} bytes > {MAX_SKILL_ZIP_DOWNLOAD_BYTES} bytes"
+                ));
+            }
+        }
+
+        let mut stream = response.bytes_stream();
+        let mut out = Vec::new();
+        let mut total: u64 = 0;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            total = total
+                .checked_add(chunk.len() as u64)
+                .ok_or_else(|| anyhow!("Skill ZIP download size overflow"))?;
+            if total > MAX_SKILL_ZIP_DOWNLOAD_BYTES {
+                return Err(anyhow!(
+                    "Skill ZIP download too large: {total} bytes > {MAX_SKILL_ZIP_DOWNLOAD_BYTES} bytes"
+                ));
+            }
+            out.extend_from_slice(&chunk);
+        }
+
+        Ok(out.into())
+    }
+
+    fn validate_zip_entry_count(entry_count: usize) -> Result<()> {
+        if entry_count > MAX_SKILL_ZIP_ENTRIES {
+            return Err(anyhow!(
+                "Skill ZIP has too many entries: {entry_count} > {MAX_SKILL_ZIP_ENTRIES}"
+            ));
+        }
+        Ok(())
+    }
+
+    fn reserve_zip_entry_bytes(name: &str, size: u64, total: &mut u64) -> Result<()> {
+        *total = total
+            .checked_add(size)
+            .ok_or_else(|| anyhow!("Skill ZIP extracted size overflow"))?;
+        if *total > MAX_SKILL_ZIP_EXTRACTED_BYTES {
+            return Err(anyhow!(
+                "Skill ZIP extracted data too large near {name}: {} bytes > {} bytes",
+                *total,
+                MAX_SKILL_ZIP_EXTRACTED_BYTES
+            ));
+        }
+        Ok(())
+    }
+
     /// 下载并解压 ZIP
     async fn download_and_extract(&self, url: &str, dest: &Path) -> Result<()> {
         let client = crate::proxy::http_client::get();
@@ -2259,9 +2314,10 @@ impl SkillService {
             )));
         }
 
-        let bytes = response.bytes().await?;
+        let bytes = Self::read_response_bytes_limited(response).await?;
         let cursor = std::io::Cursor::new(bytes);
         let mut archive = zip::ZipArchive::new(cursor)?;
+        Self::validate_zip_entry_count(archive.len())?;
 
         let root_name = if !archive.is_empty() {
             let first_file = archive.by_index(0)?;
@@ -2277,22 +2333,24 @@ impl SkillService {
 
         // 第一遍：解压普通文件和目录，收集 symlink 条目
         let mut symlinks: Vec<(PathBuf, String)> = Vec::new();
+        let mut total_uncompressed: u64 = 0;
 
         for i in 0..archive.len() {
             let mut file = archive.by_index(i)?;
             let file_path = file.name().to_string();
 
-            let relative_path =
-                if let Some(stripped) = file_path.strip_prefix(&format!("{root_name}/")) {
-                    stripped
-                } else {
-                    continue;
-                };
+            let Some(enclosed_path) = file.enclosed_name().map(|path| path.to_owned()) else {
+                continue;
+            };
+            let Ok(relative_path) = enclosed_path.strip_prefix(&root_name) else {
+                continue;
+            };
 
-            if relative_path.is_empty() {
+            if relative_path.as_os_str().is_empty() {
                 continue;
             }
 
+            Self::reserve_zip_entry_bytes(&file_path, file.size(), &mut total_uncompressed)?;
             let outpath = dest.join(relative_path);
 
             if file.is_symlink() {
@@ -2684,6 +2742,7 @@ impl SkillService {
 
         let mut archive = zip::ZipArchive::new(file)
             .with_context(|| format!("Failed to read ZIP file: {}", zip_path.display()))?;
+        Self::validate_zip_entry_count(archive.len())?;
 
         if archive.is_empty() {
             return Err(anyhow!(format_skill_error(
@@ -2698,6 +2757,7 @@ impl SkillService {
         let _ = temp_dir.keep(); // Keep the directory, we'll clean up later
 
         let mut symlinks: Vec<(PathBuf, String)> = Vec::new();
+        let mut total_uncompressed: u64 = 0;
 
         for i in 0..archive.len() {
             let mut file = archive.by_index(i)?;
@@ -2706,6 +2766,7 @@ impl SkillService {
                 None => continue,
             };
 
+            Self::reserve_zip_entry_bytes(file.name(), file.size(), &mut total_uncompressed)?;
             let outpath = temp_path.join(&file_path);
 
             if file.is_symlink() {
@@ -3123,5 +3184,17 @@ mod tests {
             dest.join("SKILL.md").is_file(),
             "existing destination skill should be preserved"
         );
+    }
+
+    #[test]
+    fn zip_budget_rejects_entry_count_and_extracted_size_overflow() {
+        let too_many_entries = SkillService::validate_zip_entry_count(MAX_SKILL_ZIP_ENTRIES + 1)
+            .expect_err("too many entries should be rejected");
+        assert!(too_many_entries.to_string().contains("too many entries"));
+
+        let mut total = MAX_SKILL_ZIP_EXTRACTED_BYTES;
+        let too_large = SkillService::reserve_zip_entry_bytes("large.bin", 1, &mut total)
+            .expect_err("oversized extracted data should be rejected");
+        assert!(too_large.to_string().contains("extracted data too large"));
     }
 }
