@@ -120,8 +120,8 @@ pub(crate) fn validate_claude_settings_policy(settings: &Value) -> Result<(), Ap
     let details = format_claude_policy_issues(&issues);
     Err(AppError::localized(
         "provider.claude.protected_settings",
-        format!("Claude 配置包含 cc-switch 不会写入的 Claude Code 2.1.143 敏感字段: {details}"),
-        format!("Claude config contains Claude Code 2.1.143 protected fields that cc-switch will not write: {details}"),
+        format!("Claude 配置包含 cc-switch 不会写入的 Claude Code 受保护字段: {details}"),
+        format!("Claude config contains protected Claude Code fields that cc-switch will not write: {details}"),
     ))
 }
 

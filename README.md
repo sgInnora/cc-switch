@@ -6,7 +6,7 @@
 
 Tracks Claude Code `2.1.143` internal env vars, deep-link/proxy redaction, skill ZIP DoS guards, usage-script sandbox limits, and CI secret leak fixes — without bypassing any Claude Code security mechanism.
 
-[Upstream README](README_UPSTREAM.md) · [中文](README_ZH.md) · [日本語](README_JA.md) · [Hardening report](.planning/v143-claude-code-protection-update-2026-05-18.md)
+[Upstream README](README_UPSTREAM.md) · [中文](README_ZH.md) · [日本語](README_JA.md) · [Hardening report](docs/HARDENING-2.1.143.md)
 
 </div>
 
@@ -53,9 +53,9 @@ pnpm install
 pnpm tauri build   # or: pnpm tauri dev
 ```
 
-## Evidence matrix (verified 2026-05-18, against Claude Code 2.1.143)
+## Evidence matrix (Claude Code 2.1.143)
 
-Every protected key below is cross-checked against an unpacked Claude Code `2.1.143` package:
+Every protected key below is referenced against the published Claude Code `2.1.143` distribution:
 
 ```bash
 $ npm view @anthropic-ai/claude-code version dist-tags
@@ -64,11 +64,11 @@ latest = 2.1.143    next = 2.1.143    stable = 2.1.133
 
 ### Retired env (present in v133, removed in v143)
 
-| Key | Evidence |
+| Key | Status |
 |---|---|
-| `CLAUDE_CODE_AGENT_COST_STEER` | `diff v133 v143/env_vars.txt` — removed |
-| `CLAUDE_CODE_DISABLE_AGENTS_FLEET` | `diff v133 v143/env_vars.txt` — removed |
-| `CLAUDE_CODE_ENABLE_OPUS_4_7_FAST_MODE` | `diff v133 v143/env_vars.txt` — removed |
+| `CLAUDE_CODE_AGENT_COST_STEER` | Removed by upstream; rejected here |
+| `CLAUDE_CODE_DISABLE_AGENTS_FLEET` | Removed by upstream; rejected here |
+| `CLAUDE_CODE_ENABLE_OPUS_4_7_FAST_MODE` | Removed by upstream; rejected here |
 
 ### Managed / runtime env (new in v143, written by Claude Code itself)
 
@@ -95,7 +95,7 @@ These can disable user hooks, force managed-only mode, or override permission/MC
 
 These are user-tunable settings introduced in v143 — pass-through preserved.
 
-Full evidence with grep references: [.planning/v143-claude-code-protection-update-2026-05-18.md](.planning/v143-claude-code-protection-update-2026-05-18.md)
+Full reference list with policy tables: [docs/HARDENING-2.1.143.md](docs/HARDENING-2.1.143.md)
 
 ## Sync policy with upstream
 
@@ -143,4 +143,4 @@ MIT — inherited from upstream.
 ## Credits
 
 - Original project: **Jason Young** ([@farion1231](https://github.com/farion1231)) — [farion1231/cc-switch](https://github.com/farion1231/cc-switch)
-- This fork: **[@sgInnora](https://github.com/sgInnora)** — hardening work cross-validated against unpacked Claude Code `2.1.143` and `2.1.133` packages.
+- This fork: **[@sgInnora](https://github.com/sgInnora)** — hardening targeting Claude Code `2.1.143`.
