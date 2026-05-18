@@ -23,14 +23,149 @@ use super::gemini_auth::{
 };
 use super::normalize_claude_models_in_value;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeConfigPolicyIssue {
+    RetiredEnv,
+    ManagedRuntimeEnv,
+    HookPolicyKey,
+}
+
+impl ClaudeConfigPolicyIssue {
+    fn label(self) -> &'static str {
+        match self {
+            Self::RetiredEnv => "retired env",
+            Self::ManagedRuntimeEnv => "managed runtime env",
+            Self::HookPolicyKey => "hook policy setting",
+        }
+    }
+}
+
+const RETIRED_CLAUDE_CODE_ENV_KEYS: &[&str] = &[
+    "CLAUDE_CODE_AGENT_COST_STEER",
+    "CLAUDE_CODE_DISABLE_AGENTS_FLEET",
+    "CLAUDE_CODE_ENABLE_OPUS_4_7_FAST_MODE",
+];
+
+const MANAGED_CLAUDE_CODE_ENV_KEYS: &[&str] = &[
+    "CLAUDE_BG_AUTH_SNAPSHOT_PATH",
+    "CLAUDE_BG_TCC_DISCLAIMED",
+    "CLAUDE_CODE_MID_CONVERSATION_SYSTEM",
+    "CLAUDE_CODE_RESUME_PROMPT",
+    "CLAUDE_CODE_SUPERVISED",
+    "CLAUDE_CODE_TEE_SDK_STDOUT",
+    "CLAUDE_CODE_VERSION",
+    "CLAUDE_ENABLE_BYTE_WATCHDOG_BEDROCK",
+];
+
+const MANAGED_CLAUDE_SETTINGS_KEYS: &[&str] = &[
+    "allowManagedHooksOnly",
+    "allowManagedMcpServersOnly",
+    "allowManagedPermissionRulesOnly",
+    "allowedHttpHookUrls",
+    "disableAgentView",
+    "disableAllHooks",
+    "disableRemoteControl",
+    "disableSkillShellExecution",
+    "httpHookAllowedEnvVars",
+    "policySettings",
+];
+
+fn classify_claude_env_key(key: &str) -> Option<ClaudeConfigPolicyIssue> {
+    let normalized = key.to_ascii_uppercase();
+    if RETIRED_CLAUDE_CODE_ENV_KEYS.contains(&normalized.as_str()) {
+        return Some(ClaudeConfigPolicyIssue::RetiredEnv);
+    }
+    if MANAGED_CLAUDE_CODE_ENV_KEYS.contains(&normalized.as_str()) {
+        return Some(ClaudeConfigPolicyIssue::ManagedRuntimeEnv);
+    }
+    None
+}
+
+fn format_claude_policy_issues(issues: &[(String, ClaudeConfigPolicyIssue)]) -> String {
+    issues
+        .iter()
+        .map(|(key, issue)| format!("{key} ({})", issue.label()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn collect_claude_policy_issues(settings: &Value) -> Vec<(String, ClaudeConfigPolicyIssue)> {
+    let mut issues = Vec::new();
+
+    if let Some(obj) = settings.as_object() {
+        for key in MANAGED_CLAUDE_SETTINGS_KEYS {
+            if obj.contains_key(*key) {
+                issues.push(((*key).to_string(), ClaudeConfigPolicyIssue::HookPolicyKey));
+            }
+        }
+
+        if let Some(env) = obj.get("env").and_then(Value::as_object) {
+            for key in env.keys() {
+                if let Some(issue) = classify_claude_env_key(key) {
+                    issues.push((key.clone(), issue));
+                }
+            }
+        }
+    }
+
+    issues
+}
+
+pub(crate) fn validate_claude_settings_policy(settings: &Value) -> Result<(), AppError> {
+    let issues = collect_claude_policy_issues(settings);
+    if issues.is_empty() {
+        return Ok(());
+    }
+
+    let details = format_claude_policy_issues(&issues);
+    Err(AppError::localized(
+        "provider.claude.protected_settings",
+        format!("Claude 配置包含 cc-switch 不会写入的 Claude Code 2.1.143 敏感字段: {details}"),
+        format!("Claude config contains Claude Code 2.1.143 protected fields that cc-switch will not write: {details}"),
+    ))
+}
+
 pub(crate) fn sanitize_claude_settings_for_live(settings: &Value) -> Value {
     let mut v = settings.clone();
+    let mut removed = Vec::new();
     if let Some(obj) = v.as_object_mut() {
         // Internal-only fields - never write to Claude Code settings.json
-        obj.remove("api_format");
-        obj.remove("apiFormat");
-        obj.remove("openrouter_compat_mode");
-        obj.remove("openrouterCompatMode");
+        for key in [
+            "api_format",
+            "apiFormat",
+            "openrouter_compat_mode",
+            "openrouterCompatMode",
+        ] {
+            if obj.remove(key).is_some() {
+                removed.push(key.to_string());
+            }
+        }
+
+        for key in MANAGED_CLAUDE_SETTINGS_KEYS {
+            if obj.remove(*key).is_some() {
+                removed.push((*key).to_string());
+            }
+        }
+
+        if let Some(env) = obj.get_mut("env").and_then(Value::as_object_mut) {
+            let blocked_keys = env
+                .keys()
+                .filter(|key| classify_claude_env_key(key).is_some())
+                .cloned()
+                .collect::<Vec<_>>();
+            for key in blocked_keys {
+                if env.remove(&key).is_some() {
+                    removed.push(format!("env.{key}"));
+                }
+            }
+        }
+    }
+
+    if !removed.is_empty() {
+        log::warn!(
+            "Removed protected Claude Code settings before live write: {}",
+            removed.join(", ")
+        );
     }
     v
 }
@@ -1501,6 +1636,130 @@ pub fn remove_openclaw_provider_from_live(provider_id: &str) -> Result<(), AppEr
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn sanitize_claude_settings_removes_v143_protected_keys_before_live_write() {
+        let settings = json!({
+            "apiFormat": "openai",
+            "disableAllHooks": true,
+            "allowManagedHooksOnly": true,
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token",
+                "ANTHROPIC_BASE_URL": "https://claude.example",
+                "CLAUDE_CODE_VERSION": "2.1.143",
+                "claude_code_agent_cost_steer": "1",
+                "CLAUDE_MEMORY_STORES": "personal,project",
+                "CLAUDE_CODE_PLUGIN_PREFER_HTTPS": "1",
+                "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP": "100"
+            }
+        });
+
+        let sanitized = sanitize_claude_settings_for_live(&settings);
+
+        assert!(sanitized.get("apiFormat").is_none());
+        assert!(sanitized.get("disableAllHooks").is_none());
+        assert!(sanitized.get("allowManagedHooksOnly").is_none());
+        assert!(sanitized["env"].get("CLAUDE_CODE_VERSION").is_none());
+        assert!(sanitized["env"]
+            .get("claude_code_agent_cost_steer")
+            .is_none());
+        assert_eq!(sanitized["env"]["ANTHROPIC_AUTH_TOKEN"], json!("token"));
+        assert_eq!(
+            sanitized["env"]["CLAUDE_MEMORY_STORES"],
+            json!("personal,project")
+        );
+        assert_eq!(
+            sanitized["env"]["CLAUDE_CODE_PLUGIN_PREFER_HTTPS"],
+            json!("1")
+        );
+        assert_eq!(
+            sanitized["env"]["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"],
+            json!("100")
+        );
+    }
+
+    #[test]
+    fn validate_claude_settings_policy_rejects_v143_protected_keys() {
+        let settings = json!({
+            "disableAllHooks": true,
+            "env": {
+                "CLAUDE_CODE_VERSION": "2.1.143",
+                "CLAUDE_CODE_ENABLE_OPUS_4_7_FAST_MODE": "1"
+            }
+        });
+
+        let err = validate_claude_settings_policy(&settings)
+            .expect_err("protected v143 keys should be rejected");
+        let message = err.to_string();
+        assert!(message.contains("CLAUDE_CODE_VERSION"));
+        assert!(message.contains("CLAUDE_CODE_ENABLE_OPUS_4_7_FAST_MODE"));
+        assert!(message.contains("disableAllHooks"));
+    }
+
+    #[test]
+    fn validate_claude_settings_policy_rejects_bg_auth_snapshot_env() {
+        let settings = json!({
+            "env": {
+                "CLAUDE_BG_AUTH_SNAPSHOT_PATH": "/tmp/attacker-controlled.json"
+            }
+        });
+
+        let err = validate_claude_settings_policy(&settings)
+            .expect_err("BG auth snapshot path must be rejected to prevent credential redirection");
+        assert!(err.to_string().contains("CLAUDE_BG_AUTH_SNAPSHOT_PATH"));
+    }
+
+    #[test]
+    fn sanitize_claude_settings_strips_expanded_governance_keys() {
+        let settings = json!({
+            "policySettings": {"foo": "bar"},
+            "allowManagedMcpServersOnly": true,
+            "allowManagedPermissionRulesOnly": true,
+            "allowedHttpHookUrls": ["https://attacker.example"],
+            "disableAgentView": true,
+            "disableRemoteControl": true,
+            "disableSkillShellExecution": true,
+            "httpHookAllowedEnvVars": ["ANTHROPIC_AUTH_TOKEN"],
+            "env": {
+                "CLAUDE_BG_AUTH_SNAPSHOT_PATH": "/tmp/x"
+            }
+        });
+
+        let sanitized = sanitize_claude_settings_for_live(&settings);
+
+        for key in [
+            "policySettings",
+            "allowManagedMcpServersOnly",
+            "allowManagedPermissionRulesOnly",
+            "allowedHttpHookUrls",
+            "disableAgentView",
+            "disableRemoteControl",
+            "disableSkillShellExecution",
+            "httpHookAllowedEnvVars",
+        ] {
+            assert!(
+                sanitized.get(key).is_none(),
+                "expected governance key {key} to be stripped"
+            );
+        }
+        assert!(sanitized["env"]
+            .get("CLAUDE_BG_AUTH_SNAPSHOT_PATH")
+            .is_none());
+    }
+
+    #[test]
+    fn sanitize_claude_settings_preserves_compatible_bgisolation_toggle() {
+        let settings = json!({
+            "bgIsolation": true,
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token"
+            }
+        });
+
+        let sanitized = sanitize_claude_settings_for_live(&settings);
+        assert_eq!(sanitized["bgIsolation"], json!(true));
+        assert_eq!(sanitized["env"]["ANTHROPIC_AUTH_TOKEN"], json!("token"));
+    }
 
     #[test]
     fn claude_common_config_apply_and_remove_roundtrip_for_non_overlapping_fields() {

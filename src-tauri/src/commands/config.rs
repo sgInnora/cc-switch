@@ -48,8 +48,12 @@ fn validate_common_config_snippet(app_type: &str, snippet: &str) -> Result<(), S
 
     match app_type {
         "claude" | "gemini" | "omo" | "omo-slim" => {
-            serde_json::from_str::<serde_json::Value>(snippet)
+            let parsed = serde_json::from_str::<serde_json::Value>(snippet)
                 .map_err(invalid_json_format_error)?;
+            if app_type == "claude" {
+                crate::services::provider::validate_claude_settings_policy(&parsed)
+                    .map_err(|e| e.to_string())?;
+            }
         }
         "codex" => {
             snippet
@@ -246,9 +250,7 @@ pub async fn set_claude_common_config_snippet(
 ) -> Result<(), String> {
     let is_cleared = snippet.trim().is_empty();
 
-    if !snippet.trim().is_empty() {
-        serde_json::from_str::<serde_json::Value>(&snippet).map_err(invalid_json_format_error)?;
-    }
+    validate_common_config_snippet("claude", &snippet)?;
 
     let value = if is_cleared { None } else { Some(snippet) };
 
@@ -369,6 +371,24 @@ mod tests {
         assert!(
             err.contains("TOML") || err.contains("toml") || err.contains("格式"),
             "expected TOML validation error, got {err}"
+        );
+    }
+
+    #[test]
+    fn validate_common_config_snippet_rejects_claude_v143_protected_env() {
+        let err = validate_common_config_snippet(
+            "claude",
+            r#"{
+  "env": {
+    "CLAUDE_CODE_VERSION": "2.1.143"
+  }
+}"#,
+        )
+        .expect_err("protected Claude Code env should be rejected");
+
+        assert!(
+            err.contains("CLAUDE_CODE_VERSION"),
+            "expected protected env error, got {err}"
         );
     }
 }

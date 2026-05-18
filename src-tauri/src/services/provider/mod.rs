@@ -28,12 +28,12 @@ pub use live::{
 };
 
 // Internal re-exports (pub(crate))
-pub(crate) use live::sanitize_claude_settings_for_live;
 pub(crate) use live::{
     build_effective_settings_with_common_config, normalize_provider_common_config_for_storage,
     provider_exists_in_live_config, strip_common_config_from_live_settings,
     sync_current_provider_for_app_to_live, write_live_with_common_config,
 };
+pub(crate) use live::{sanitize_claude_settings_for_live, validate_claude_settings_policy};
 
 // Internal re-exports
 use live::{
@@ -289,6 +289,29 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn validate_provider_settings_rejects_claude_v143_protected_env() {
+        let provider = Provider::with_id(
+            "claude".into(),
+            "Claude".into(),
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "token",
+                    "ANTHROPIC_BASE_URL": "https://claude.example",
+                    "CLAUDE_CODE_SUPERVISED": "1"
+                }
+            }),
+            None,
+        );
+
+        let err = ProviderService::validate_provider_settings(&AppType::Claude, &provider)
+            .expect_err("managed runtime env should be rejected");
+        assert!(
+            err.to_string().contains("CLAUDE_CODE_SUPERVISED"),
+            "expected protected env error, got {err:?}"
+        );
     }
 
     #[test]
@@ -2094,6 +2117,7 @@ impl ProviderService {
                         "Claude configuration must be a JSON object",
                     ));
                 }
+                validate_claude_settings_policy(&provider.settings_config)?;
             }
             AppType::ClaudeDesktop => {
                 crate::claude_desktop_config::validate_provider(provider)?;
